@@ -126,4 +126,4 @@ MIT
 
 ## Author
 
-[Your Name], M.S. Computer Science, UC Santa Cruz
+Quinlan Hoang, M.S. Computer Science, UC Santa Cruz
