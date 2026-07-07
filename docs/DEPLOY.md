@@ -29,8 +29,9 @@ Test it by visiting that URL. You should see the health check response.
 
 - The app must listen on port 7860. This is already set in `app.py` and the `Dockerfile`.
 - Only the `/tmp` directory is writable. Model caches are already redirected there in the `Dockerfile`.
-- On a public Space, your code and endpoints are visible to anyone. Use a private Space to keep it between you and your advisor.
-- The demo mode runs automatically when no trained model file is present, so the API works before training is finished.
+- On a public Space, your code and endpoints are visible to anyone. Use a private Space to keep it between you and your advisor — but note the dashboard on GitHub Pages can only call a public Space, so for the professor demo keep the Space public and the GitHub repo is what you can keep private.
+- The trained model in `backend/artifacts/` ships with the code, so the Space serves live model predictions immediately — no training on the Space.
+- The image installs only `requirements.txt` (no PyTorch), which keeps the Space build small and fast. Training happens locally with `requirements-train.txt`.
 
 ## Frontend to GitHub Pages
 

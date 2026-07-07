@@ -14,19 +14,28 @@ NodeSense addresses both problems. A transformer model trained on the CICIDS-201
 
 ## Features
 
-- Transformer sequence classifier trained on 80 network flow features
-- Random forest and autoencoder baselines for benchmarking
-- SHAP explanations attached to every prediction
-- FastAPI inference server with ONNX runtime for fast predictions
-- React dashboard with a live alert feed and feature contribution charts
-- Fully reproducible training pipeline
+- Transformer sequence classifier over 20 network flow features, 6 classes
+  (Benign, DDoS, Port Scan, Brute Force, Botnet, Infiltration)
+- Random forest and autoencoder baselines benchmarked in the same pipeline
+- Real KernelSHAP explanations computed against the served ONNX model
+- FastAPI inference server with ONNX Runtime (no PyTorch at serve time)
+- React dashboard with a live model-classified alert feed and per-alert
+  feature contribution charts (WebSocket, with REST polling fallback)
+- Fully reproducible training pipeline with a synthetic CICIDS-style data
+  generator, so everything runs end to end without the 70GB dataset
 
 ## Architecture
 
 ```
-PCAP capture -> Flow features -> Transformer model -> Prediction + SHAP explanation
-                                                              |
-                                              FastAPI  ->  React dashboard
+data.py  synthetic flow sessions (or real CICIDS-2018 CSVs)
+   |
+train.py  RF + autoencoder baselines, transformer training
+   |
+artifacts/  model.onnx + preprocess.json + background.npy  (committed)
+   |
+app.py  FastAPI: /predict (+SHAP via explain.py), /ws/alerts, /demo/stream
+   |
+frontend/  React dashboard: live alert feed + SHAP contribution chart
 ```
 
 ## Project Structure
@@ -34,19 +43,22 @@ PCAP capture -> Flow features -> Transformer model -> Prediction + SHAP explanat
 ```
 nodesense/
 ├── backend/
-│   ├── app.py              FastAPI inference server
-│   ├── models.py           Model architectures (RF, autoencoder, transformer)
-│   ├── train.py            Training pipeline
-│   ├── explain.py          SHAP explanation module
-│   ├── requirements.txt
+│   ├── app.py                  FastAPI inference server
+│   ├── data.py                 Synthetic flow generator + CICIDS loader
+│   ├── models.py               Model architectures (RF, autoencoder, transformer)
+│   ├── train.py                Training pipeline + ONNX export
+│   ├── explain.py              KernelSHAP over the ONNX model
+│   ├── artifacts/              Exported model + preprocessing state
+│   ├── requirements.txt        Serving dependencies (used by Dockerfile)
+│   ├── requirements-train.txt  Training extras (PyTorch, onnxscript)
 │   └── Dockerfile
 ├── frontend/
-│   ├── src/                React dashboard
+│   ├── src/                    React dashboard
 │   ├── package.json
 │   └── vite.config.js
-├── notebooks/              EDA and experiments
+├── notebooks/                  EDA and experiments
 └── docs/
-    └── research_log.md     Progress log
+    └── research_log.md         Progress log
 ```
 
 ## Quick Start
@@ -55,11 +67,15 @@ nodesense/
 
 ```bash
 cd backend
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+py -3.12 -m venv venv           # PyTorch/SHAP need Python <= 3.12
+venv\Scripts\activate           # macOS/Linux: source venv/bin/activate
+pip install -r requirements.txt -r requirements-train.txt
+python train.py                 # trains everything, exports artifacts/
 uvicorn app:app --reload --port 7860
 ```
+
+A trained model is already committed in `backend/artifacts/`, so the server
+runs in live mode even if you skip `train.py`.
 
 The API is now running at http://localhost:7860 with interactive docs at http://localhost:7860/docs
 
@@ -77,16 +93,17 @@ The dashboard is now running at http://localhost:5173
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/` | Health check |
-| POST | `/predict` | Classify a network flow, optionally with SHAP explanation |
-| GET | `/demo/stream` | Simulated alert stream for the dashboard demo |
+| GET | `/` | Health check, reports live/demo mode |
+| POST | `/predict` | Classify a network flow (20 raw features), optionally with SHAP explanation |
+| WS | `/ws/alerts` | Live stream of model-classified alerts |
+| GET | `/demo/stream` | REST polling fallback for the alert stream |
 
 ### Example Request
 
 ```bash
 curl -X POST http://localhost:7860/predict \
   -H "Content-Type: application/json" \
-  -d '{"features": [0.5, 1.2, ...], "explain": true}'
+  -d '{"features": [3006.6, 1, 0, 59.6, 25.4, 113.4, 39.8, 8453.0, 332.6, 3006.6, 384.6, 3578.5, 2439.0, 0, 1, 0, 0, 0, 25.4, 228.7], "explain": true}'
 ```
 
 ### Example Response
@@ -94,17 +111,29 @@ curl -X POST http://localhost:7860/predict \
 ```json
 {
   "anomaly": true,
-  "confidence": 0.94,
+  "confidence": 0.99,
+  "attack_type": "Port Scan",
   "explanation": [
-    {"feature": "Flow Bytes/s", "contribution": 0.43},
-    {"feature": "Fwd IAT Mean", "contribution": -0.31}
+    {"feature": "Flow Duration", "contribution": 0.362},
+    {"feature": "Total Fwd Packets", "contribution": 0.258}
   ]
 }
 ```
 
 ## Dataset
 
-NodeSense is trained on the [CICIDS-2018 dataset](https://www.unb.ca/cic/datasets/ids-2018.html) from the Canadian Institute for Cybersecurity. The dataset is not included in this repository due to size. Download it separately and place the CSV files in a `data/` directory at the project root.
+The committed model is trained on synthetic flow sessions from
+`backend/data.py`, whose class distributions are modeled on how each attack
+looks at the flow level. To train on the real
+[CICIDS-2018 dataset](https://www.unb.ca/cic/datasets/ids-2018.html) from the
+Canadian Institute for Cybersecurity, download the CSVs into `data/` and run:
+
+```bash
+python train.py --data "../data/*.csv"
+```
+
+`data.py` maps the CICIDS column names onto the same 20-feature vector, so a
+model trained on either source serves identically.
 
 ## Deployment
 

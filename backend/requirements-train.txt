@@ -1,0 +1,5 @@
+# Training-only dependencies, on top of requirements.txt.
+# torch 2.4.0 has a broken fbgemm.dll on Windows; require a fixed release.
+torch>=2.6
+onnx>=1.17
+onnxscript>=0.7

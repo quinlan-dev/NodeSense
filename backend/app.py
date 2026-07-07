@@ -1,56 +1,64 @@
 """
 NodeSense inference server.
 
-Serves anomaly predictions with optional SHAP explanations.
-Runs a demo mode with simulated traffic when no trained model is present,
-so the dashboard works end to end before training is complete.
+Serves anomaly predictions from the exported ONNX transformer with
+optional SHAP explanations. The alert stream generates live traffic
+sessions and runs them through the real model, so every alert on the
+dashboard is an actual model decision.
+
+If artifacts/ is missing (model not trained yet), the server falls back
+to a demo mode with simulated predictions so the dashboard still works.
 """
 
-import os
-import random
 import asyncio
 import json
+import os
+import random
+import time
 from contextlib import asynccontextmanager
 
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-MODEL_PATH = os.environ.get("MODEL_PATH", "model.onnx")
-DEMO_MODE = not os.path.exists(MODEL_PATH)
+from data import CLASS_NAMES, FEATURE_NAMES, SEQ_LEN, generate_sessions
 
-# Feature names for the CICIDS-2018 flow features used in explanations.
-# Trim or extend this list to match your final feature set after preprocessing.
-FEATURE_NAMES = [
-    "Flow Duration", "Total Fwd Packets", "Total Bwd Packets",
-    "Fwd Packet Length Max", "Fwd Packet Length Mean", "Bwd Packet Length Max",
-    "Bwd Packet Length Mean", "Flow Bytes/s", "Flow Packets/s",
-    "Flow IAT Mean", "Flow IAT Std", "Fwd IAT Mean", "Bwd IAT Mean",
-    "Fwd PSH Flags", "SYN Flag Count", "ACK Flag Count", "URG Flag Count",
-    "Down/Up Ratio", "Average Packet Size", "Idle Mean",
-]
+ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts")
 
-sess = None
-explainer = None
+state = {"session": None, "explainer": None, "pre": None}
+
+
+def load_artifacts():
+    model_path = os.path.join(ARTIFACT_DIR, "model.onnx")
+    if not os.path.exists(model_path):
+        return False
+    import onnxruntime as ort
+    from explain import FlowExplainer
+
+    with open(os.path.join(ARTIFACT_DIR, "preprocess.json")) as f:
+        state["pre"] = json.load(f)
+    state["session"] = ort.InferenceSession(model_path)
+    background = np.load(os.path.join(ARTIFACT_DIR, "background.npy"))
+    state["explainer"] = FlowExplainer(
+        state["session"], background, state["pre"]["seq_len"]
+    )
+    return True
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global sess
-    if not DEMO_MODE:
-        import onnxruntime as ort
-        sess = ort.InferenceSession(MODEL_PATH)
-        print(f"Loaded model from {MODEL_PATH}")
+    if load_artifacts():
+        print(f"Loaded model artifacts from {ARTIFACT_DIR}")
     else:
-        print("No model found. Running in demo mode with simulated predictions.")
+        print("No trained model found. Running in demo mode. Run train.py first.")
     yield
 
 
 app = FastAPI(
     title="NodeSense API",
     description="Explainable network anomaly detection",
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -77,46 +85,124 @@ class ExplanationItem(BaseModel):
 class PredictionResponse(BaseModel):
     anomaly: bool
     confidence: float
+    attack_type: str
     explanation: list[ExplanationItem] | None = None
 
 
-def softmax(x: np.ndarray) -> np.ndarray:
-    e = np.exp(x - np.max(x))
+def _softmax(x):
+    e = np.exp(x - x.max(axis=-1, keepdims=True))
     return e / e.sum(axis=-1, keepdims=True)
 
 
-def demo_prediction(features: list[float], explain: bool) -> dict:
-    """Simulated prediction used before a trained model exists."""
-    confidence = round(random.uniform(0.05, 0.98), 3)
-    result = {"anomaly": confidence > 0.5, "confidence": confidence, "explanation": None}
-    if explain:
-        sampled = random.sample(FEATURE_NAMES, 6)
-        result["explanation"] = [
-            {"feature": name, "contribution": round(random.uniform(-0.5, 0.5), 3)}
-            for name in sampled
-        ]
-        result["explanation"].sort(key=lambda e: abs(e["contribution"]), reverse=True)
-    return result
+def scale_flow(raw: np.ndarray) -> np.ndarray:
+    pre = state["pre"]
+    x = raw.astype(np.float64).copy()
+    mask = np.array(pre["log_mask"])
+    x[mask] = np.log1p(np.clip(x[mask], 0, None))
+    x = (x - np.array(pre["scaler_mean"])) / np.array(pre["scaler_scale"])
+    return x.astype(np.float32)
+
+
+def predict_sequence(seq_scaled: np.ndarray) -> tuple[int, float, np.ndarray]:
+    """Run one scaled (seq_len, n_feat) sequence. Returns
+    (class_idx, anomaly_confidence, class_probs)."""
+    logits = state["session"].run(None, {"input": seq_scaled[None]})[0]
+    probs = _softmax(logits)[0]
+    cls = int(probs.argmax())
+    if cls == 0:  # model says benign; confidence = P(any attack)
+        return 0, float(1.0 - probs[0]), probs
+    return cls, float(probs[cls]), probs
 
 
 def real_prediction(features: list[float], explain: bool) -> dict:
-    x = np.array(features, dtype=np.float32).reshape(1, -1)
-    logits = sess.run(None, {"input": x})[0]
-    prob = float(softmax(logits)[0][1])
-    result = {"anomaly": prob > 0.5, "confidence": round(prob, 3), "explanation": None}
-    if explain and explainer is not None:
-        # See explain.py for building the SHAP explainer against the trained model
-        shap_values = explainer.shap_values(x)
-        pairs = sorted(
-            zip(FEATURE_NAMES, shap_values[1][0]),
-            key=lambda p: abs(p[1]),
-            reverse=True,
-        )[:10]
-        result["explanation"] = [
-            {"feature": name, "contribution": round(float(val), 3)}
-            for name, val in pairs
-        ]
+    if len(features) != len(FEATURE_NAMES):
+        raise HTTPException(
+            422, f"Expected {len(FEATURE_NAMES)} features, got {len(features)}"
+        )
+    flow = scale_flow(np.array(features))
+    seq = np.repeat(flow[None], SEQ_LEN, axis=0)
+    cls, conf, probs = predict_sequence(seq)
+    result = {
+        "anomaly": cls != 0,
+        "confidence": round(conf, 3),
+        "attack_type": CLASS_NAMES[cls],
+        "explanation": None,
+    }
+    if explain:
+        # Explain toward the predicted attack class, or the most likely
+        # attack class when the flow was ruled benign.
+        target = cls if cls != 0 else int(probs[1:].argmax()) + 1
+        result["explanation"] = state["explainer"].explain(
+            flow, target, FEATURE_NAMES
+        )
     return result
+
+
+def demo_prediction(features: list[float], explain: bool) -> dict:
+    confidence = round(random.uniform(0.05, 0.98), 3)
+    anomaly = confidence > 0.5
+    result = {
+        "anomaly": anomaly,
+        "confidence": confidence,
+        "attack_type": random.choice(CLASS_NAMES[1:]) if anomaly else "Benign",
+        "explanation": None,
+    }
+    if explain:
+        sampled = random.sample(FEATURE_NAMES, 6)
+        result["explanation"] = sorted(
+            (
+                {"feature": n, "contribution": round(random.uniform(-0.5, 0.5), 3)}
+                for n in sampled
+            ),
+            key=lambda e: abs(e["contribution"]),
+            reverse=True,
+        )
+    return result
+
+
+def generate_alert(rng_seed: int | None = None) -> dict | None:
+    """Generate one traffic session, classify it with the real model, and
+    return an alert dict if the model flags it. The raw features of a
+    representative flow ride along so the dashboard can request a SHAP
+    explanation for exactly this alert."""
+    seed = rng_seed if rng_seed is not None else random.randrange(2**31)
+    X, y, y_flow = generate_sessions(n_sessions=1, seed=seed, benign_frac=0.35)
+    seq_scaled = np.stack([scale_flow(f) for f in X[0]])
+    cls, conf, _ = predict_sequence(seq_scaled)
+    if cls == 0:
+        return None
+    # pick a flow of the session's attack class as the representative
+    attack_flows = np.where(y_flow[0] == y[0])[0]
+    rep = int(attack_flows[0]) if len(attack_flows) else SEQ_LEN - 1
+    return {
+        "timestamp": time.time(),
+        "source_ip": f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}",
+        "attack_type": CLASS_NAMES[cls],
+        "confidence": round(conf, 3),
+        "features": [round(float(v), 4) for v in X[0][rep]],
+        "true_label": CLASS_NAMES[y[0]],
+    }
+
+
+def demo_alert() -> dict:
+    return {
+        "timestamp": time.time(),
+        "source_ip": f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}",
+        "attack_type": random.choice(CLASS_NAMES[1:]),
+        "confidence": round(random.uniform(0.5, 0.99), 3),
+        "features": [round(random.uniform(0, 2), 4) for _ in FEATURE_NAMES],
+        "true_label": None,
+    }
+
+
+def next_alert() -> dict:
+    if state["session"] is None:
+        return demo_alert()
+    for _ in range(10):  # benign sessions produce no alert; try a few
+        alert = generate_alert()
+        if alert:
+            return alert
+    return demo_alert()
 
 
 @app.get("/")
@@ -124,33 +210,33 @@ def health():
     return {
         "service": "NodeSense",
         "status": "ok",
-        "mode": "demo" if DEMO_MODE else "live",
+        "mode": "demo" if state["session"] is None else "live",
+        "features": len(FEATURE_NAMES),
+        "classes": CLASS_NAMES,
     }
 
 
 @app.post("/predict", response_model=PredictionResponse)
 def predict(req: FlowRequest):
-    if DEMO_MODE:
+    if state["session"] is None:
         return demo_prediction(req.features, req.explain)
     return real_prediction(req.features, req.explain)
 
 
+@app.get("/demo/stream")
+def demo_stream(n: int = 5):
+    """Polling fallback for the dashboard when WebSockets are unavailable."""
+    return {"alerts": [next_alert() for _ in range(min(n, 20))]}
+
+
 @app.websocket("/ws/alerts")
 async def alert_stream(websocket: WebSocket):
-    """Streams simulated alerts so the dashboard has live data to render."""
+    """Streams model-classified alerts to the dashboard."""
     await websocket.accept()
-    attack_types = ["DDoS", "Port Scan", "Brute Force", "Botnet", "Infiltration"]
     try:
         while True:
-            await asyncio.sleep(random.uniform(1.0, 4.0))
-            confidence = round(random.uniform(0.5, 0.99), 3)
-            alert = {
-                "timestamp": asyncio.get_event_loop().time(),
-                "source_ip": f"10.0.{random.randint(0,255)}.{random.randint(1,254)}",
-                "attack_type": random.choice(attack_types),
-                "confidence": confidence,
-                "top_feature": random.choice(FEATURE_NAMES),
-            }
+            await asyncio.sleep(random.uniform(1.5, 4.0))
+            alert = await asyncio.to_thread(next_alert)
             await websocket.send_text(json.dumps(alert))
     except WebSocketDisconnect:
         pass
