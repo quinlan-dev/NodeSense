@@ -1,162 +1,91 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
-} from 'recharts'
+import { useState } from 'react'
+import { useAuth, useRoute, useSettings, useAlertStream, navigate } from './lib'
+import Landing from './views/Landing'
+import Login from './views/Login'
+import Dashboard from './views/Dashboard'
+import Analytics from './views/Analytics'
+import Docs from './views/Docs'
+import Settings from './views/Settings'
 
-// Local dev goes through the Vite proxy (/api) and a direct WebSocket.
-// Production points at the Hugging Face Space running backend/.
-const API_BASE = import.meta.env.PROD
-  ? 'https://quinlan-dev-nodesense.hf.space'
-  : '/api'
-
-const WS_BASE = import.meta.env.PROD
-  ? 'wss://quinlan-dev-nodesense.hf.space'
-  : 'ws://localhost:7860'
+const NAV = [
+  { route: 'dashboard', label: 'Dashboard', auth: true },
+  { route: 'analytics', label: 'Analytics', auth: true },
+  { route: 'docs', label: 'Docs', auth: false },
+  { route: 'settings', label: 'Settings', auth: true },
+]
 
 function App() {
-  const [alerts, setAlerts] = useState([])
-  const [selected, setSelected] = useState(null)
-  const [explanation, setExplanation] = useState(null)
-  const [status, setStatus] = useState('connecting')
-  const [mode, setMode] = useState(null)
-  const pollTimer = useRef(null)
+  const route = useRoute()
+  const { user, login, logout } = useAuth()
+  const { settings, update, reset } = useSettings()
+  const [paused, setPaused] = useState(false)
+  // The stream lives at the shell level so the feed survives navigation.
+  const stream = useAlertStream(settings, paused)
 
-  const pushAlert = useCallback((alert) => {
-    alert.id = Date.now() + Math.random()
-    setAlerts((prev) => [alert, ...prev].slice(0, 50))
-  }, [])
+  const protectedRoutes = ['dashboard', 'analytics', 'settings']
+  const effective = protectedRoutes.includes(route) && !user ? 'login' : route
 
-  // Backend health check reports whether a trained model is serving
-  useEffect(() => {
-    fetch(`${API_BASE}/`)
-      .then((r) => r.json())
-      .then((d) => setMode(d.mode))
-      .catch(() => setMode(null))
-  }, [])
-
-  // Live alert stream over WebSocket, with REST polling as a fallback
-  useEffect(() => {
-    let ws
-    let closed = false
-
-    const startPolling = () => {
-      if (pollTimer.current) return
-      setStatus('polling')
-      pollTimer.current = setInterval(async () => {
-        try {
-          const res = await fetch(`${API_BASE}/demo/stream?n=1`)
-          const data = await res.json()
-          data.alerts.forEach(pushAlert)
-        } catch {
-          setStatus('disconnected')
-        }
-      }, 3000)
-    }
-
-    try {
-      ws = new WebSocket(`${WS_BASE}/ws/alerts`)
-      ws.onopen = () => setStatus('live')
-      ws.onmessage = (e) => pushAlert(JSON.parse(e.data))
-      ws.onerror = () => { if (!closed) startPolling() }
-      ws.onclose = () => { if (!closed) startPolling() }
-    } catch {
-      startPolling()
-    }
-
-    return () => {
-      closed = true
-      if (ws) ws.close()
-      if (pollTimer.current) clearInterval(pollTimer.current)
-      pollTimer.current = null
-    }
-  }, [pushAlert])
-
-  // Fetch a SHAP explanation for the selected alert's actual flow features
-  const explainAlert = useCallback(async (alert) => {
-    setSelected(alert)
-    setExplanation(null)
-    try {
-      const res = await fetch(`${API_BASE}/predict`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ features: alert.features, explain: true }),
-      })
-      const data = await res.json()
-      setExplanation(data.explanation || [])
-    } catch {
-      setExplanation([])
-    }
-  }, [])
-
-  const maxAbs = explanation?.length
-    ? Math.max(...explanation.map((e) => Math.abs(e.contribution)), 0.1)
-    : 0.5
+  let view
+  switch (effective) {
+    case 'login':
+      view = <Login onLogin={(name) => { login(name); navigate('dashboard') }} />
+      break
+    case 'dashboard':
+      view = <Dashboard stream={stream} settings={settings} paused={paused} setPaused={setPaused} />
+      break
+    case 'analytics':
+      view = <Analytics stream={stream} settings={settings} />
+      break
+    case 'docs':
+      view = <Docs />
+      break
+    case 'settings':
+      view = <Settings settings={settings} update={update} reset={reset} onLogout={() => { logout(); navigate('') }} />
+      break
+    default:
+      view = <Landing user={user} mode={stream.mode} />
+  }
 
   return (
-    <div className="app">
-      <header>
-        <h1>NodeSense</h1>
-        <span className={`status ${status}`}>{status}</span>
-        {mode && <span className={`status mode-${mode}`}>{mode === 'live' ? 'model: live' : 'model: demo'}</span>}
+    <div className="shell">
+      <header className="topbar">
+        <a className="brand" href="#/">
+          <span className="brand-mark">N</span> NodeSense
+        </a>
+        <nav className="mainnav">
+          {NAV.map((n) => (
+            <a key={n.route} href={`#/${n.route}`} className={route === n.route ? 'active' : ''}>
+              {n.label}
+            </a>
+          ))}
+        </nav>
+        <div className="topbar-right">
+          <button
+            className="icon-btn"
+            title="Toggle theme"
+            onClick={() => update({ theme: settings.theme === 'dark' ? 'light' : 'dark' })}
+          >
+            {settings.theme === 'dark' ? '☀' : '☾'}
+          </button>
+          {user ? (
+            <span className="user-chip">
+              <span className="avatar">{user.name.slice(0, 1).toUpperCase()}</span>
+              {user.name}
+              <button onClick={() => { logout(); navigate('') }}>sign out</button>
+            </span>
+          ) : (
+            <a className="btn small primary" href="#/login">Sign in</a>
+          )}
+        </div>
       </header>
 
-      <main>
-        <section className="alert-feed">
-          <h2>Live Alerts</h2>
-          {alerts.length === 0 && <p className="empty">Waiting for traffic...</p>}
-          <ul>
-            {alerts.map((a) => (
-              <li
-                key={a.id}
-                className={selected?.id === a.id ? 'selected' : ''}
-                onClick={() => explainAlert(a)}
-              >
-                <span className="attack-type">{a.attack_type}</span>
-                <span className="source">{a.source_ip}</span>
-                <span className="confidence">
-                  {(a.confidence * 100).toFixed(0)}%
-                </span>
-              </li>
-            ))}
-          </ul>
-        </section>
+      {effective === '' ? view : <main className="content">{view}</main>}
 
-        <section className="explanation-panel">
-          <h2>Why was this flagged?</h2>
-          {!selected && <p className="empty">Select an alert to see its explanation.</p>}
-          {selected && !explanation && <p className="empty">Computing SHAP values...</p>}
-          {selected && explanation && (
-            <p className="alert-detail">
-              <strong>{selected.attack_type}</strong> from {selected.source_ip}
-              {' '}at {(selected.confidence * 100).toFixed(0)}% confidence
-            </p>
-          )}
-          {explanation && explanation.length > 0 && (
-            <ResponsiveContainer width="100%" height={320}>
-              <BarChart data={explanation} layout="vertical" margin={{ left: 40 }}>
-                <XAxis type="number" domain={[-maxAbs * 1.1, maxAbs * 1.1]} tickFormatter={(v) => v.toFixed(2)} />
-                <YAxis type="category" dataKey="feature" width={150} tick={{ fontSize: 12 }} />
-                <Tooltip
-                  formatter={(v) => [v.toFixed(4), 'SHAP contribution']}
-                  contentStyle={{ background: '#1a2029', border: '1px solid #2a323d' }}
-                />
-                <Bar dataKey="contribution">
-                  {explanation.map((entry, i) => (
-                    <Cell key={i} fill={entry.contribution > 0 ? '#d9534f' : '#5b8dd9'} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-          {explanation && explanation.length > 0 && (
-            <p className="legend">
-              Red features pushed the model toward flagging this connection.
-              Blue features pushed toward benign. Values are SHAP
-              contributions to the predicted attack class probability.
-            </p>
-          )}
-        </section>
-      </main>
+      <footer className="site">
+        NodeSense — explainable network anomaly detection · Graduate independent
+        study, UC Santa Cruz ·{' '}
+        <a href="https://github.com/quinlan-dev/NodeSense" target="_blank" rel="noreferrer">GitHub</a>
+      </footer>
     </div>
   )
 }
