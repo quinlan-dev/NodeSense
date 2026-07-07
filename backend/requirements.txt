@@ -1,10 +1,11 @@
+# Serving dependencies (what the Docker image / HF Space installs).
+# Training additionally needs requirements-train.txt.
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic==2.9.0
 numpy==1.26.4
 pandas==2.2.2
 scikit-learn==1.5.1
-torch==2.4.0
 shap==0.46.0
 onnxruntime==1.19.0
 python-multipart==0.0.9

@@ -1,50 +1,63 @@
 """
 NodeSense explanation module.
 
-Wraps a trained model with SHAP to produce feature level explanations
-for every prediction. Build the explainer once at server startup and
-reuse it, since constructing it is expensive.
+Produces per-feature SHAP attributions for a single flow using
+KernelSHAP over the exported ONNX model, so the server never needs
+PyTorch at inference time.
+
+The model consumes sequences, but explanations are computed at the flow
+level: the flow under inspection is tiled into a full sequence, and
+KernelSHAP perturbs its 20 features against a k-means summary of the
+training background. Positive contributions push toward the target
+attack class, negative toward benign.
 """
 
 import numpy as np
 import shap
-import torch
 
 
-def build_explainer(model, background_data: np.ndarray, n_background: int = 200):
-    """Build a SHAP DeepExplainer for a PyTorch model.
-
-    background_data should be a sample of training data. Larger backgrounds
-    give more stable values but slow computation. 100 to 200 rows is a
-    reasonable tradeoff for real time explanation.
-    """
-    background = torch.tensor(
-        background_data[:n_background], dtype=torch.float32
-    )
-    return shap.DeepExplainer(model, background)
+def _softmax(x):
+    e = np.exp(x - x.max(axis=-1, keepdims=True))
+    return e / e.sum(axis=-1, keepdims=True)
 
 
-def explain_prediction(explainer, x: np.ndarray, feature_names: list[str], top_k: int = 10):
-    """Return the top_k features driving a single prediction.
+class FlowExplainer:
+    def __init__(self, session, background: np.ndarray, seq_len: int,
+                 n_background: int = 10):
+        """
+        session: onnxruntime InferenceSession, input (batch, seq_len, n_feat)
+        background: (n, n_feat) scaled training flows; summarized with
+            k-means because KernelSHAP cost is linear in background size.
+        """
+        self.session = session
+        self.seq_len = seq_len
+        self.background = shap.kmeans(background, n_background)
 
-    Positive contributions push toward the anomaly class,
-    negative contributions push toward benign.
-    """
-    x_tensor = torch.tensor(x, dtype=torch.float32)
-    if x_tensor.dim() == 1:
-        x_tensor = x_tensor.unsqueeze(0)
+    def _predict_class_prob(self, class_idx: int):
+        def f(X: np.ndarray) -> np.ndarray:
+            seqs = np.repeat(
+                X.astype(np.float32)[:, None, :], self.seq_len, axis=1
+            )
+            logits = self.session.run(None, {"input": seqs})[0]
+            return _softmax(logits)[:, class_idx]
+        return f
 
-    shap_values = explainer.shap_values(x_tensor)
-    # Index 1 holds contributions toward the anomaly class
-    values = shap_values[1][0]
-
-    pairs = sorted(
-        zip(feature_names, values),
-        key=lambda p: abs(p[1]),
-        reverse=True,
-    )[:top_k]
-
-    return [
-        {"feature": name, "contribution": round(float(val), 4)}
-        for name, val in pairs
-    ]
+    def explain(self, flow_scaled: np.ndarray, class_idx: int,
+                feature_names: list[str], top_k: int = 8,
+                nsamples: int = 150) -> list[dict]:
+        """Top_k features driving P(class_idx) for one scaled flow."""
+        explainer = shap.KernelExplainer(
+            self._predict_class_prob(class_idx), self.background
+        )
+        values = explainer.shap_values(
+            flow_scaled.reshape(1, -1), nsamples=nsamples, silent=True
+        )[0]
+        pairs = sorted(
+            zip(feature_names, values),
+            key=lambda p: abs(p[1]),
+            reverse=True,
+        )[:top_k]
+        return [
+            {"feature": name, "contribution": round(float(val), 4)}
+            for name, val in pairs
+        ]

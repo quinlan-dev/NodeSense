@@ -3,10 +3,12 @@ data/
 *.csv
 *.pcap
 
-# Model artifacts
+# Model artifacts (except the small exported serving artifacts,
+# which are committed so the deployed Space works without retraining)
 *.pth
 *.onnx
 *.pkl
+!backend/artifacts/model.onnx
 
 # Python
 __pycache__/
