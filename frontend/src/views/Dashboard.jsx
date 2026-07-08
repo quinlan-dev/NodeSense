@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from 'react'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
 } from 'recharts'
-import { apiBase, CHART, ATTACK_TYPES } from '../lib'
+import { apiBase, CHART, ATTACK_TYPES, attackColor } from '../lib'
 
 function Dashboard({ stream, settings, paused, setPaused }) {
   const { alerts, status, mode, clear } = stream
@@ -99,6 +99,7 @@ function Dashboard({ stream, settings, paused, setPaused }) {
               <li
                 key={a.id}
                 className={selected?.id === a.id ? 'selected' : ''}
+                style={{ borderLeftColor: attackColor(a.attack_type, settings.theme) }}
                 onClick={() => explainAlert(a)}
               >
                 <span className="attack-type">{a.attack_type}</span>
