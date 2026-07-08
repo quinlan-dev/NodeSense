@@ -1,3 +1,6 @@
+import { useEffect, useRef, useState } from 'react'
+import { attackColor } from '../lib'
+
 const FEATURES = [
   {
     ico: '🧠',
@@ -50,6 +53,90 @@ const PIPELINE = [
   },
 ]
 
+const STATS = [
+  { to: 20, suffix: '', label: 'flow features per prediction' },
+  { to: 6, suffix: '', label: 'traffic classes distinguished' },
+  { to: 120, prefix: '~', suffix: 'ms', label: 'per SHAP explanation (CPU)' },
+  { to: 335, suffix: 'KB', label: 'deployed ONNX model' },
+]
+
+const PREVIEW_ALERTS = [
+  { type: 'Port Scan', ip: '10.0.202.156', conf: '99%' },
+  { type: 'DDoS', ip: '10.0.44.218', conf: '99%' },
+  { type: 'Botnet', ip: '10.0.117.42', conf: '97%' },
+]
+
+function CountUp({ to, prefix = '', suffix = '', duration = 1200 }) {
+  const [val, setVal] = useState(0)
+  const ref = useRef(null)
+  useEffect(() => {
+    let raf
+    let started = false
+    const start = () => {
+      if (started) return
+      started = true
+      const t0 = performance.now()
+      const tick = (t) => {
+        const p = Math.min((t - t0) / duration, 1)
+        setVal(Math.round(to * (1 - Math.pow(1 - p, 3)))) // ease-out cubic
+        if (p < 1) raf = requestAnimationFrame(tick)
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    const obs = new IntersectionObserver(
+      (entries) => entries[0].isIntersecting && start(),
+      { threshold: 0.4 }
+    )
+    if (ref.current) obs.observe(ref.current)
+    return () => { obs.disconnect(); cancelAnimationFrame(raf) }
+  }, [to, duration])
+  return <span ref={ref}>{prefix}{val}{suffix}</span>
+}
+
+function HeroPreview() {
+  // theme for attackColor: read current doc theme so preview matches
+  const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
+  return (
+    <div className="hero-preview" aria-hidden="true">
+      <div className="hp-head">
+        <span className="hp-dots"><i /><i /><i /></span>
+        live detection · nodesense
+        <span className="status live" style={{ marginLeft: 'auto' }}>live</span>
+      </div>
+      <div className="hp-body">
+        {PREVIEW_ALERTS.map((a) => (
+          <div className="hp-row" key={a.ip} style={{ borderLeftColor: attackColor(a.type, theme) }}>
+            <span className="t">{a.type}</span>
+            <span className="ip">{a.ip}</span>
+            <span className="c">{a.conf}</span>
+          </div>
+        ))}
+      </div>
+      <div className="hp-shap">
+        <div className="lbl">Why was this flagged?</div>
+        {[
+          ['Flow Duration', 78, true],
+          ['Total Fwd Packets', 56, true],
+          ['Fwd Packet Length Max', 22, false],
+        ].map(([name, pct, attack]) => (
+          <div className="hp-bar" key={name}>
+            <span className="name">{name}</span>
+            <span className="track">
+              <span
+                className="fill"
+                style={{
+                  width: `${pct}%`,
+                  background: attack ? 'var(--danger)' : 'var(--accent-strong)',
+                }}
+              />
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function Landing({ user }) {
   return (
     <>
@@ -71,11 +158,15 @@ function Landing({ user }) {
           <a className="btn" href="#/docs">Read the docs</a>
         </div>
 
+        <HeroPreview />
+
         <div className="statstrip">
-          <div className="stat-tile"><div className="val">20</div><div className="lbl">flow features per prediction</div></div>
-          <div className="stat-tile"><div className="val">6</div><div className="lbl">traffic classes distinguished</div></div>
-          <div className="stat-tile"><div className="val">~120ms</div><div className="lbl">per SHAP explanation (CPU)</div></div>
-          <div className="stat-tile"><div className="val">335KB</div><div className="lbl">deployed ONNX model</div></div>
+          {STATS.map((s) => (
+            <div className="stat-tile" key={s.label}>
+              <div className="val"><CountUp to={s.to} prefix={s.prefix} suffix={s.suffix} /></div>
+              <div className="lbl">{s.label}</div>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -127,6 +218,14 @@ function Landing({ user }) {
               <span key={t}>{t}</span>
             ))}
           </div>
+        </section>
+
+        <section className="cta-band">
+          <h2>See it detect in real time</h2>
+          <p>Open the live dashboard, watch the model classify traffic, and click any alert for its explanation.</p>
+          <a className="btn primary" href={user ? '#/dashboard' : '#/login'}>
+            {user ? 'Open dashboard' : 'Launch the demo'}
+          </a>
         </section>
       </main>
     </>
