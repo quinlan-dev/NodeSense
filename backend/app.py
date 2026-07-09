@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import random
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -27,6 +28,10 @@ from data import CLASS_NAMES, FEATURE_NAMES, SEQ_LEN, generate_sessions
 ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts")
 
 state = {"session": None, "explainer": None, "pre": None}
+
+# SHAP is the expensive path (~120ms of CPU per call); bound how many can
+# run at once so a burst of explain requests can't starve the host.
+_explain_slots = threading.Semaphore(2)
 
 
 def load_artifacts():
@@ -62,13 +67,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Allow the dashboard to call this API from a different origin.
-# Lock allow_origins down to your actual frontend URL before public launch.
+# Only the deployed dashboard and local dev servers may call this API.
+ALLOWED_ORIGINS = [
+    "https://quinlan-dev.github.io",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -132,9 +142,14 @@ def real_prediction(features: list[float], explain: bool) -> dict:
         # Explain toward the predicted attack class, or the most likely
         # attack class when the flow was ruled benign.
         target = cls if cls != 0 else int(probs[1:].argmax()) + 1
-        result["explanation"] = state["explainer"].explain(
-            flow, target, FEATURE_NAMES
-        )
+        if not _explain_slots.acquire(timeout=10):
+            raise HTTPException(503, "Explanation workers busy, retry shortly")
+        try:
+            result["explanation"] = state["explainer"].explain(
+                flow, target, FEATURE_NAMES
+            )
+        finally:
+            _explain_slots.release()
     return result
 
 
