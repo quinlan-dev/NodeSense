@@ -1,0 +1,6 @@
+{
+  "temperature": 0.5,
+  "ece_before": 0.0065,
+  "ece_after": 0.0,
+  "note": "Fit and evaluated on the same held-out split (synthetic data is small); treat as a demonstration of the calibration gap, not a production calibration fit. Serving still returns raw softmax confidence \u2014 see docs/MODEL_CARD.md."
+}

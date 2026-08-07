@@ -1,0 +1,61 @@
+{
+  "n_test_sessions": 800,
+  "class_names": [
+    "Benign",
+    "DDoS",
+    "Port Scan",
+    "Brute Force",
+    "Botnet",
+    "Infiltration"
+  ],
+  "per_class": {
+    "Benign": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 440
+    },
+    "DDoS": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 74
+    },
+    "Port Scan": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 64
+    },
+    "Brute Force": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 77
+    },
+    "Botnet": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 73
+    },
+    "Infiltration": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 72
+    }
+  },
+  "macro_f1": 1.0,
+  "weighted_f1": 1.0,
+  "accuracy": 1.0,
+  "roc_auc_ovr": {
+    "Benign": 1.0,
+    "DDoS": 1.0,
+    "Port Scan": 1.0,
+    "Brute Force": 1.0,
+    "Botnet": 1.0,
+    "Infiltration": 1.0
+  },
+  "benign_false_positive_rate": 0.0
+}
