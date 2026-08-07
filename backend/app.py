@@ -12,26 +12,64 @@ to a demo mode with simulated predictions so the dashboard still works.
 
 import asyncio
 import json
+import logging
+import math
 import os
 import random
 import threading
 import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, field_validator
 
 from data import CLASS_NAMES, FEATURE_NAMES, SEQ_LEN, generate_sessions
 
 ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts")
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("nodesense")
+# shap logs its internal linear algebra (kernel weights, phi arrays) at
+# INFO, which would otherwise drown out the one-line predict log below.
+logging.getLogger("shap").setLevel(logging.WARNING)
 
 state = {"session": None, "explainer": None, "pre": None}
 
 # SHAP is the expensive path (~120ms of CPU per call); bound how many can
 # run at once so a burst of explain requests can't starve the host.
 _explain_slots = threading.Semaphore(2)
+
+# In-memory sliding-window rate limit, keyed by client IP. Deliberately not
+# a separate dependency (slowapi etc.) for a single-process demo API; a
+# multi-worker or multi-instance deployment would need a shared backend
+# (Redis) instead since this state does not cross processes.
+RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "30"))
+RATE_LIMIT_WINDOW_S = int(os.environ.get("RATE_LIMIT_WINDOW_S", "60"))
+_rate_state: dict[str, deque] = defaultdict(deque)
+_rate_lock = threading.Lock()
+
+MAX_BODY_BYTES = 8 * 1024  # a 20-float request is ~a few hundred bytes
+
+
+def check_rate_limit(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    with _rate_lock:
+        q = _rate_state[ip]
+        while q and now - q[0] > RATE_LIMIT_WINDOW_S:
+            q.popleft()
+        if len(q) >= RATE_LIMIT_REQUESTS:
+            raise HTTPException(429, "Rate limit exceeded, please slow down")
+        q.append(now)
 
 
 def load_artifacts():
@@ -67,13 +105,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Only the deployed dashboard and local dev servers may call this API.
-ALLOWED_ORIGINS = [
+# Only the deployed dashboard and local dev servers may call this API by
+# default. Override with ALLOWED_ORIGINS="https://a.example,https://b.example"
+# (comma separated, no spaces) to lock this down further for another deployment.
+_DEFAULT_ORIGINS = [
     "https://quinlan-dev.github.io",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:4173",
 ]
+_origins_env = os.environ.get("ALLOWED_ORIGINS")
+ALLOWED_ORIGINS = [o.strip() for o in _origins_env.split(",")] if _origins_env else _DEFAULT_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -82,14 +124,77 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def security_headers_and_body_limit(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_BODY_BYTES:
+        return JSONResponse({"detail": "Request body too large"}, status_code=413)
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+def _sanitize_non_finite(obj):
+    """Recursively replace NaN/Infinity floats with their string form.
+
+    FastAPI's default 422 handler echoes the rejected input back in the
+    error body, and Starlette's JSONResponse renders with allow_nan=False
+    — so without this, submitting NaN/Infinity (exactly the input our own
+    validator rejects) crashes the error handler itself with a 500 instead
+    of cleanly returning 422.
+    """
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {k: _sanitize_non_finite(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_non_finite(v) for v in obj]
+    return obj
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = _sanitize_non_finite(jsonable_encoder(exc.errors()))
+    return JSONResponse(status_code=422, content={"detail": errors})
+
+
 class FlowRequest(BaseModel):
     features: list[float]
     explain: bool = False
+
+    @field_validator("features")
+    @classmethod
+    def validate_features(cls, v: list[float]) -> list[float]:
+        if len(v) != len(FEATURE_NAMES):
+            raise ValueError(
+                f"Expected exactly {len(FEATURE_NAMES)} features, got {len(v)}"
+            )
+        for x in v:
+            if math.isnan(x) or math.isinf(x):
+                raise ValueError("Feature values must be finite (no NaN or inf)")
+        return v
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "features": [
+                        3006.6, 1, 0, 59.6, 25.4, 113.4, 39.8, 8453.0, 332.6,
+                        3006.6, 384.6, 3578.5, 2439.0, 0, 1, 0, 0, 0, 25.4, 228.7,
+                    ],
+                    "explain": True,
+                }
+            ]
+        }
+    }
 
 
 class ExplanationItem(BaseModel):
     feature: str
     contribution: float
+    value: float
 
 
 class PredictionResponse(BaseModel):
@@ -125,11 +230,8 @@ def predict_sequence(seq_scaled: np.ndarray) -> tuple[int, float, np.ndarray]:
 
 
 def real_prediction(features: list[float], explain: bool) -> dict:
-    if len(features) != len(FEATURE_NAMES):
-        raise HTTPException(
-            422, f"Expected {len(FEATURE_NAMES)} features, got {len(features)}"
-        )
-    flow = scale_flow(np.array(features))
+    raw = np.array(features)
+    flow = scale_flow(raw)
     seq = np.repeat(flow[None], SEQ_LEN, axis=0)
     cls, conf, probs = predict_sequence(seq)
     result = {
@@ -146,7 +248,7 @@ def real_prediction(features: list[float], explain: bool) -> dict:
             raise HTTPException(503, "Explanation workers busy, retry shortly")
         try:
             result["explanation"] = state["explainer"].explain(
-                flow, target, FEATURE_NAMES
+                flow, target, FEATURE_NAMES, raw_values=raw
             )
         finally:
             _explain_slots.release()
@@ -163,11 +265,15 @@ def demo_prediction(features: list[float], explain: bool) -> dict:
         "explanation": None,
     }
     if explain:
-        sampled = random.sample(FEATURE_NAMES, 6)
+        sampled_idx = random.sample(range(len(FEATURE_NAMES)), 6)
         result["explanation"] = sorted(
             (
-                {"feature": n, "contribution": round(random.uniform(-0.5, 0.5), 3)}
-                for n in sampled
+                {
+                    "feature": FEATURE_NAMES[i],
+                    "contribution": round(random.uniform(-0.5, 0.5), 3),
+                    "value": round(features[i], 4) if i < len(features) else 0.0,
+                }
+                for i in sampled_idx
             ),
             key=lambda e: abs(e["contribution"]),
             reverse=True,
@@ -231,22 +337,45 @@ def health():
     }
 
 
-@app.post("/predict", response_model=PredictionResponse)
+@app.post("/predict", response_model=PredictionResponse, dependencies=[Depends(check_rate_limit)])
 def predict(req: FlowRequest):
+    t0 = time.perf_counter()
     if state["session"] is None:
-        return demo_prediction(req.features, req.explain)
-    return real_prediction(req.features, req.explain)
+        result = demo_prediction(req.features, req.explain)
+    else:
+        result = real_prediction(req.features, req.explain)
+    latency_ms = (time.perf_counter() - t0) * 1000
+    # Log the decision and timing, never the raw feature vector.
+    logger.info(
+        "predict class=%s anomaly=%s confidence=%.3f explain=%s latency_ms=%.1f mode=%s",
+        result["attack_type"], result["anomaly"], result["confidence"],
+        req.explain, latency_ms, "demo" if state["session"] is None else "live",
+    )
+    return result
 
 
-@app.get("/demo/stream")
+# Cap concurrent WebSocket clients so a burst of connections cannot exhaust
+# the single free-tier instance this normally runs on.
+MAX_WS_CONNECTIONS = int(os.environ.get("MAX_WS_CONNECTIONS", "50"))
+_ws_connections = 0
+_ws_lock = threading.Lock()
+
+
+@app.get("/demo/stream", dependencies=[Depends(check_rate_limit)])
 def demo_stream(n: int = 5):
     """Polling fallback for the dashboard when WebSockets are unavailable."""
-    return {"alerts": [next_alert() for _ in range(min(n, 20))]}
+    return {"alerts": [next_alert() for _ in range(min(max(n, 0), 20))]}
 
 
 @app.websocket("/ws/alerts")
 async def alert_stream(websocket: WebSocket):
     """Streams model-classified alerts to the dashboard."""
+    global _ws_connections
+    with _ws_lock:
+        if _ws_connections >= MAX_WS_CONNECTIONS:
+            await websocket.close(code=1013)  # 1013 = "try again later"
+            return
+        _ws_connections += 1
     await websocket.accept()
     try:
         while True:
@@ -255,6 +384,9 @@ async def alert_stream(websocket: WebSocket):
             await websocket.send_text(json.dumps(alert))
     except WebSocketDisconnect:
         pass
+    finally:
+        with _ws_lock:
+            _ws_connections -= 1
 
 
 if __name__ == "__main__":
