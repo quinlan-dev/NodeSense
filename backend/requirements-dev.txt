@@ -1,0 +1,8 @@
+# Dev/CI dependencies: running pytest, evaluate.py, and global_importance.py.
+# No torch here on purpose — those scripts only need onnxruntime against the
+# already-exported model, so CI installs this (fast) instead of
+# requirements-train.txt (slow). zero_day_eval.py retrains models and needs
+# requirements-train.txt in addition to this file.
+pytest==8.3.3
+httpx==0.27.2
+matplotlib==3.9.2
