@@ -58,6 +58,43 @@ def preprocess_apply(X, scaler):
     return flat.reshape(shape).astype(np.float32)
 
 
+def build_dataset(data_glob: str | None = None, sessions: int = 4000, seed: int = 42,
+                   exclude_class: int | None = None):
+    """Load raw data, split, and fit/apply preprocessing — the exact steps
+    the shipped model's artifacts were produced by. Shared by train.py's
+    main, evaluate.py, and zero_day_eval.py so "held-out test set" always
+    means the same rows and the same scaler for every script that reports
+    numbers about this model.
+
+    exclude_class drops all sessions of that class index from the training
+    split only (used by the leave-one-attack-out zero-day evaluation); the
+    test split is untouched so held-out recall is measured against the
+    same sessions every other script reports on.
+    """
+    if data_glob:
+        X, y, y_flow = load_cicids(sorted(glob.glob(data_glob)))
+    else:
+        X, y, y_flow = generate_sessions(n_sessions=sessions, seed=seed)
+
+    X_tr, X_te, y_tr, y_te, yf_tr, yf_te = train_test_split(
+        X, y, y_flow, test_size=0.2, random_state=42, stratify=y
+    )
+
+    if exclude_class is not None:
+        keep = y_tr != exclude_class
+        X_tr, y_tr, yf_tr = X_tr[keep], y_tr[keep], yf_tr[keep]
+
+    scaler = preprocess_fit(X_tr)
+    Xs_tr = preprocess_apply(X_tr, scaler)
+    Xs_te = preprocess_apply(X_te, scaler)
+    return {
+        "X_tr": Xs_tr, "X_te": Xs_te,
+        "y_tr": y_tr, "y_te": y_te,
+        "yf_tr": yf_tr, "yf_te": yf_te,
+        "scaler": scaler,
+    }
+
+
 def eval_binary(name, y_true, y_pred, y_score):
     """All models are compared on the shared task both can do:
     anomaly vs benign."""
@@ -179,18 +216,13 @@ if __name__ == "__main__":
     parser.add_argument("--skip-baselines", action="store_true")
     args = parser.parse_args()
 
-    if args.data:
-        X, y, y_flow = load_cicids(sorted(glob.glob(args.data)))
-    else:
-        X, y, y_flow = generate_sessions(n_sessions=args.sessions)
-    print(f"{len(X)} sessions of {SEQ_LEN} flows, "
-          f"class counts: {np.bincount(y, minlength=len(CLASS_NAMES)).tolist()}")
-
-    X_tr, X_te, y_tr, y_te, yf_tr, yf_te = train_test_split(
-        X, y, y_flow, test_size=0.2, random_state=42, stratify=y
-    )
-    scaler = preprocess_fit(X_tr)
-    Xs_tr, Xs_te = preprocess_apply(X_tr, scaler), preprocess_apply(X_te, scaler)
+    ds = build_dataset(data_glob=args.data, sessions=args.sessions)
+    Xs_tr, Xs_te = ds["X_tr"], ds["X_te"]
+    y_tr, y_te = ds["y_tr"], ds["y_te"]
+    yf_tr, yf_te = ds["yf_tr"], ds["yf_te"]
+    scaler = ds["scaler"]
+    print(f"{len(Xs_tr) + len(Xs_te)} sessions of {SEQ_LEN} flows, "
+          f"class counts: {np.bincount(y_tr, minlength=len(CLASS_NAMES)).tolist()} (train)")
 
     if not args.skip_baselines:
         flat_tr = Xs_tr.reshape(-1, Xs_tr.shape[-1])
