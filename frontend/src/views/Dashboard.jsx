@@ -33,19 +33,27 @@ function Dashboard({ stream, settings, paused, setPaused }) {
     }
   }, [visible])
 
+  const [explainError, setExplainError] = useState(null)
+
   const explainAlert = useCallback(async (alert) => {
     setSelected(alert)
     setExplanation(null)
+    setExplainError(null)
     try {
       const res = await fetch(`${apiBase(settings)}/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ features: alert.features, explain: true }),
       })
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null)
+        throw new Error(detail?.detail ? String(detail.detail) : `HTTP ${res.status}`)
+      }
       const data = await res.json()
       setExplanation(data.explanation || [])
-    } catch {
+    } catch (err) {
       setExplanation([])
+      setExplainError(err.message || 'Could not reach the backend.')
     }
   }, [settings])
 
@@ -90,8 +98,14 @@ function Dashboard({ stream, settings, paused, setPaused }) {
             <button className="btn small" onClick={clear}>Clear</button>
           </div>
           {visible.length === 0 && (
-            <p className="empty">
-              {alerts.length ? 'No alerts match the current filters.' : 'Waiting for traffic...'}
+            <p className={`empty ${status === 'disconnected' ? 'error-text' : ''}`}>
+              {alerts.length
+                ? 'No alerts match the current filters.'
+                : status === 'waking'
+                  ? 'Waking up the backend (free-tier hosting sleeps after inactivity, this can take up to a minute)...'
+                  : status === 'disconnected'
+                    ? "Can't reach the backend. It may be asleep, redeploying, or the API endpoint in Settings may be wrong."
+                    : 'Waiting for traffic...'}
             </p>
           )}
           <ul>
@@ -113,7 +127,19 @@ function Dashboard({ stream, settings, paused, setPaused }) {
         <section className="card explanation-panel">
           <h2>Why was this flagged?</h2>
           {!selected && <p className="empty">Select an alert to see its explanation.</p>}
-          {selected && !explanation && <p className="empty">Computing SHAP values...</p>}
+          {selected && !explanation && (
+            <p className="empty loading-dots">
+              {status === 'waking'
+                ? 'Backend is waking up from idle (free-tier hosting sleeps after inactivity — this can take up to a minute)...'
+                : 'Computing SHAP values...'}
+            </p>
+          )}
+          {selected && explanation && explanation.length === 0 && explainError && (
+            <p className="empty error-text">
+              Couldn't get an explanation: {explainError}. The backend may be
+              asleep or unreachable — try again in a moment.
+            </p>
+          )}
           {selected && explanation && (
             <p className="alert-detail">
               <strong>{selected.attack_type}</strong> from {selected.source_ip}
@@ -123,7 +149,10 @@ function Dashboard({ stream, settings, paused, setPaused }) {
           {explanation && explanation.length > 0 && (
             <>
               <ResponsiveContainer width="100%" height={320}>
-                <BarChart data={explanation} layout="vertical" margin={{ left: 40, right: 10 }}>
+                <BarChart
+                  data={explanation.map((e) => ({ ...e, label: `${e.feature} (${e.value})` }))}
+                  layout="vertical" margin={{ left: 40, right: 10 }}
+                >
                   <XAxis
                     type="number"
                     domain={[-maxAbs * 1.1, maxAbs * 1.1]}
@@ -133,13 +162,16 @@ function Dashboard({ stream, settings, paused, setPaused }) {
                   />
                   <YAxis
                     type="category"
-                    dataKey="feature"
-                    width={150}
+                    dataKey="label"
+                    width={190}
                     stroke={chart.axis}
-                    tick={{ fontSize: 12, fill: chart.axis }}
+                    tick={{ fontSize: 11, fill: chart.axis }}
                   />
                   <Tooltip
-                    formatter={(v) => [v.toFixed(4), 'SHAP contribution']}
+                    formatter={(v, name, props) => [
+                      `${v.toFixed(4)} (feature value: ${props.payload.value})`,
+                      'SHAP contribution',
+                    ]}
                     contentStyle={{
                       background: chart.tooltipBg,
                       border: `1px solid ${chart.tooltipBorder}`,
@@ -158,8 +190,9 @@ function Dashboard({ stream, settings, paused, setPaused }) {
                 <span style={{ color: chart.attack, fontWeight: 700 }}>■</span> pushed
                 the model toward flagging this connection ·{' '}
                 <span style={{ color: chart.benign, fontWeight: 700 }}>■</span> pushed
-                toward benign. Values are SHAP contributions to the predicted
-                attack class probability.
+                toward benign. The number in parentheses is the flow's
+                actual value for that feature; the bar is its SHAP
+                contribution to the predicted attack class probability.
               </p>
             </>
           )}

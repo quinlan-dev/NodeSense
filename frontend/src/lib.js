@@ -90,6 +90,14 @@ export function navigate(route) {
 
 // ---------- live alert stream ----------
 
+// Free-tier hosts (Hugging Face Spaces, Render, etc.) sleep the backend
+// after idle and take real time to cold-start. A failure in the first
+// WAKING_GRACE_MS window (or the first WAKING_GRACE_FAILS polling
+// attempts) reads as "waking up"; only after that does it read as a
+// genuine "disconnected" the user should worry about.
+const WAKING_GRACE_MS = 45_000
+const WAKING_GRACE_FAILS = 3
+
 export function useAlertStream(settings, paused) {
   const [alerts, setAlerts] = useState([])
   const [status, setStatus] = useState('connecting')
@@ -108,28 +116,53 @@ export function useAlertStream(settings, paused) {
   const api = apiBase(settings)
   const ws = wsBase(settings)
 
+  // Health check with retry, so a cold backend reads as "waking" rather
+  // than silently leaving mode unknown forever.
   useEffect(() => {
-    fetch(`${api}/`)
-      .then((r) => r.json())
-      .then((d) => setMode(d.mode))
-      .catch(() => setMode(null))
+    let cancelled = false
+    let attempt = 0
+    const startedAt = Date.now()
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`${api}/`)
+        const d = await res.json()
+        if (!cancelled) setMode(d.mode)
+      } catch {
+        attempt += 1
+        if (cancelled) return
+        setMode(null)
+        if (Date.now() - startedAt < WAKING_GRACE_MS) {
+          setTimeout(poll, 4000)
+        }
+      }
+    }
+    poll()
+    return () => { cancelled = true }
   }, [api])
 
   useEffect(() => {
     let sock
     let closed = false
     let pollTimer = null
+    let pollFailures = 0
+    const startedAt = Date.now()
 
     const startPolling = () => {
       if (pollTimer || closed) return
-      setStatus('polling')
+      setStatus('waking')
       pollTimer = setInterval(async () => {
         try {
           const res = await fetch(`${api}/demo/stream?n=1`)
           const data = await res.json()
           data.alerts.forEach(pushAlert)
+          pollFailures = 0
+          setStatus('polling')
         } catch {
-          setStatus('disconnected')
+          pollFailures += 1
+          const stillWaking = pollFailures <= WAKING_GRACE_FAILS
+            && Date.now() - startedAt < WAKING_GRACE_MS
+          setStatus(stillWaking ? 'waking' : 'disconnected')
         }
       }, 3000)
     }
