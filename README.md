@@ -48,17 +48,25 @@ nodesense/
 │   ├── models.py               Model architectures (RF, autoencoder, transformer)
 │   ├── train.py                Training pipeline + ONNX export
 │   ├── explain.py              KernelSHAP over the ONNX model
-│   ├── artifacts/              Exported model + preprocessing state
+│   ├── evaluate.py             Held-out metrics, confusion matrix, calibration
+│   ├── zero_day_eval.py        Leave-one-attack-out generalization study
+│   ├── benchmark.py            Inference latency percentiles
+│   ├── global_importance.py    Aggregate SHAP feature importance
+│   ├── tests/                  pytest suite (API + preprocessing)
+│   ├── artifacts/              Exported model + preprocessing state + eval/
 │   ├── requirements.txt        Serving dependencies (used by Dockerfile)
 │   ├── requirements-train.txt  Training extras (PyTorch, onnxscript)
+│   ├── requirements-dev.txt    Test/eval extras (pytest, httpx, matplotlib)
 │   └── Dockerfile
 ├── frontend/
 │   ├── src/                    React dashboard
 │   ├── package.json
 │   └── vite.config.js
 ├── notebooks/                  EDA and experiments
+├── .github/workflows/          CI (tests + build) and optional Pages deploy
 └── docs/
-    └── research_log.md         Progress log
+    ├── research_log.md         Progress log
+    └── MODEL_CARD.md           Intended use, metrics, limitations, ethics
 ```
 
 ## Quick Start
@@ -144,6 +152,35 @@ The backend is designed to deploy on Hugging Face Spaces using the included Dock
 cd frontend
 npm run deploy
 ```
+
+### Backend environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ALLOWED_ORIGINS` | the GitHub Pages dashboard + local dev ports | Comma-separated list of origins allowed to call the API (CORS). Set this to lock the API to a different frontend origin. |
+| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_S` | `30` / `60` | Per-IP request cap on `/predict` and `/demo/stream` (sliding window, in-memory — see the model card's limitations section for the multi-worker caveat). |
+| `MAX_WS_CONNECTIONS` | `50` | Caps concurrent `/ws/alerts` clients per instance. |
+| `LOG_LEVEL` | `INFO` | Python logging level for the `nodesense` logger. |
+
+## Model card and evaluation
+
+See [docs/MODEL_CARD.md](docs/MODEL_CARD.md) for intended use, training
+data caveats, and the full evaluation suite's results: held-out
+precision/recall/F1/AUC, confidence calibration, a leave-one-attack-out
+zero-day generalization study, and inference latency. Regenerate all of it
+against the current model with:
+
+```bash
+cd backend
+python evaluate.py            # metrics, confusion matrix, calibration
+python zero_day_eval.py        # leave-one-attack-out (retrains 5 models)
+python benchmark.py            # latency percentiles
+python global_importance.py    # aggregate SHAP feature importance
+```
+
+These need `requirements-dev.txt` (evaluate.py, global_importance.py) and
+additionally `requirements-train.txt` (zero_day_eval.py, which retrains
+models).
 
 ## Tech Stack
 
