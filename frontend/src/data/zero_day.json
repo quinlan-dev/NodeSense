@@ -1,0 +1,36 @@
+{
+  "description": "Each row trains a model with the named class fully removed from training, then reports what fraction of that class's held-out test sessions were still flagged as anomalous.",
+  "folds": [
+    {
+      "held_out_class": "DDoS",
+      "n_held_out_test_sessions": 74,
+      "zero_day_anomaly_recall": 1.0,
+      "in_distribution_accuracy": 1.0
+    },
+    {
+      "held_out_class": "Port Scan",
+      "n_held_out_test_sessions": 64,
+      "zero_day_anomaly_recall": 1.0,
+      "in_distribution_accuracy": 1.0
+    },
+    {
+      "held_out_class": "Brute Force",
+      "n_held_out_test_sessions": 77,
+      "zero_day_anomaly_recall": 0.974,
+      "in_distribution_accuracy": 1.0
+    },
+    {
+      "held_out_class": "Botnet",
+      "n_held_out_test_sessions": 73,
+      "zero_day_anomaly_recall": 0.9863,
+      "in_distribution_accuracy": 1.0
+    },
+    {
+      "held_out_class": "Infiltration",
+      "n_held_out_test_sessions": 72,
+      "zero_day_anomaly_recall": 0.0,
+      "in_distribution_accuracy": 1.0
+    }
+  ],
+  "mean_zero_day_recall": 0.7921
+}

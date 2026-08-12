@@ -26,7 +26,8 @@ import numpy as np
 import torch
 
 from data import CLASS_NAMES
-from train import build_dataset, train_transformer
+from dataset import build_dataset
+from train import train_transformer
 
 ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts")
 EVAL_DIR = os.path.join(ARTIFACT_DIR, "eval")

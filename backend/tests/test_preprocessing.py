@@ -1,9 +1,13 @@
-"""Tests for the log+standard-scaling preprocessing transform in train.py."""
+"""Tests for the log+standard-scaling preprocessing transform in dataset.py.
+
+Imports from dataset (not train) on purpose: train.py needs torch, and CI
+runs these tests without the training dependencies installed.
+"""
 
 import numpy as np
 
 from data import FEATURE_NAMES, generate_sessions
-from train import preprocess_apply, preprocess_fit
+from dataset import preprocess_apply, preprocess_fit
 
 
 def test_preprocess_preserves_shape():

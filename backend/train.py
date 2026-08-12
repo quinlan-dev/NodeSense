@@ -15,7 +15,6 @@ Usage:
 """
 
 import argparse
-import glob
 import json
 import os
 
@@ -23,76 +22,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.metrics import classification_report, roc_auc_score
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 
-from data import CLASS_NAMES, FEATURE_NAMES, SEQ_LEN, generate_sessions, load_cicids
+from data import CLASS_NAMES, FEATURE_NAMES, SEQ_LEN
+from dataset import LOG_MASK, build_dataset
 from models import Autoencoder, NetworkTransformer, build_random_forest
 
 ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts")
-
-# Heavy-tailed features get log1p before scaling; flag counts and ratios don't.
-LOG_FEATURES = [
-    "Flow Duration", "Total Fwd Packets", "Total Bwd Packets",
-    "Fwd Packet Length Max", "Fwd Packet Length Mean", "Bwd Packet Length Max",
-    "Bwd Packet Length Mean", "Flow Bytes/s", "Flow Packets/s",
-    "Flow IAT Mean", "Flow IAT Std", "Fwd IAT Mean", "Bwd IAT Mean",
-    "Average Packet Size", "Idle Mean",
-]
-LOG_MASK = np.array([f in LOG_FEATURES for f in FEATURE_NAMES])
-
-
-def preprocess_fit(X):
-    """Fit log+standard scaling on (n_sessions, SEQ_LEN, n_feat) raw flows."""
-    flat = X.reshape(-1, X.shape[-1]).copy()
-    flat[:, LOG_MASK] = np.log1p(np.clip(flat[:, LOG_MASK], 0, None))
-    scaler = StandardScaler().fit(flat)
-    return scaler
-
-
-def preprocess_apply(X, scaler):
-    shape = X.shape
-    flat = X.reshape(-1, shape[-1]).astype(np.float64)
-    flat[:, LOG_MASK] = np.log1p(np.clip(flat[:, LOG_MASK], 0, None))
-    flat = scaler.transform(flat)
-    return flat.reshape(shape).astype(np.float32)
-
-
-def build_dataset(data_glob: str | None = None, sessions: int = 4000, seed: int = 42,
-                   exclude_class: int | None = None):
-    """Load raw data, split, and fit/apply preprocessing — the exact steps
-    the shipped model's artifacts were produced by. Shared by train.py's
-    main, evaluate.py, and zero_day_eval.py so "held-out test set" always
-    means the same rows and the same scaler for every script that reports
-    numbers about this model.
-
-    exclude_class drops all sessions of that class index from the training
-    split only (used by the leave-one-attack-out zero-day evaluation); the
-    test split is untouched so held-out recall is measured against the
-    same sessions every other script reports on.
-    """
-    if data_glob:
-        X, y, y_flow = load_cicids(sorted(glob.glob(data_glob)))
-    else:
-        X, y, y_flow = generate_sessions(n_sessions=sessions, seed=seed)
-
-    X_tr, X_te, y_tr, y_te, yf_tr, yf_te = train_test_split(
-        X, y, y_flow, test_size=0.2, random_state=42, stratify=y
-    )
-
-    if exclude_class is not None:
-        keep = y_tr != exclude_class
-        X_tr, y_tr, yf_tr = X_tr[keep], y_tr[keep], yf_tr[keep]
-
-    scaler = preprocess_fit(X_tr)
-    Xs_tr = preprocess_apply(X_tr, scaler)
-    Xs_te = preprocess_apply(X_te, scaler)
-    return {
-        "X_tr": Xs_tr, "X_te": Xs_te,
-        "y_tr": y_tr, "y_te": y_te,
-        "yf_tr": yf_tr, "yf_te": yf_te,
-        "scaler": scaler,
-    }
 
 
 def eval_binary(name, y_true, y_pred, y_score):

@@ -1,5 +1,8 @@
-# Data (too large for git, download separately)
-data/
+# CICIDS dataset (too large for git, download separately).
+# Anchored to the repo root — an unanchored "data/" also swallowed
+# frontend/src/data/, which silently kept the dashboard's bundled
+# evaluation JSONs out of git and broke the CI build.
+/data/
 *.csv
 *.pcap
 

@@ -24,7 +24,7 @@ import onnxruntime as ort
 
 from data import CLASS_NAMES, FEATURE_NAMES
 from explain import FlowExplainer
-from train import build_dataset
+from dataset import build_dataset
 
 ARTIFACT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "artifacts")
 EVAL_DIR = os.path.join(ARTIFACT_DIR, "eval")
