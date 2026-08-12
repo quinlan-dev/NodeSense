@@ -1,5 +1,7 @@
 # NodeSense
 
+https://quinlan-dev.github.io/NodeSense/#/
+
 **Explainable AI for Network Intrusion Detection**
 
 NodeSense is a network anomaly detection system that uses a transformer based sequence model to identify malicious traffic patterns, including novel attacks that signature based tools like Snort cannot catch. Every detection comes with a plain language explanation of which network flow features drove the decision, so analysts can understand and act on alerts instead of treating the model as a black box.
